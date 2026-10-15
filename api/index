@@ -1,0 +1,119 @@
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+import httpx
+
+app = FastAPI(title="Animeverse Catalog API", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+ANILIST_URL = "https://graphql.anilist.co"
+
+async def anilist(query: str, variables: dict | None = None):
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            response = await client.post(
+                ANILIST_URL,
+                json={"query": query, "variables": variables or {}},
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("errors"):
+            raise HTTPException(status_code=502, detail="Anime metadata provider returned an error")
+        return payload.get("data", {})
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Anime metadata provider timed out")
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Could not reach anime metadata provider")
+
+MEDIA_FIELDS = """
+ id idMal title { romaji english native userPreferred }
+ coverImage { extraLarge large medium } bannerImage
+ description(asHtml: false) genres averageScore popularity episodes status
+ seasonYear format duration siteUrl
+"""
+
+@app.get("/")
+def root():
+    return {
+        "name": "Animeverse Catalog API",
+        "status": "online",
+        "endpoints": [
+            "/api/health",
+            "/api/anime/search?query=naruto",
+            "/api/anime/trending",
+            "/api/anime/popular",
+            "/api/anime/genres",
+            "/api/anime/info?id=21",
+        ],
+        "note": "Catalog metadata only. This API does not provide episode video streams."
+    }
+
+@app.get("/api/health")
+def health():
+    return {"ok": True, "service": "animeverse-catalog-api"}
+
+@app.get("/api/anime/search")
+async def search_anime(query: str = Query(min_length=1, max_length=100), page: int = Query(1, ge=1, le=100), per_page: int = Query(20, ge=1, le=50)):
+    gql = f"""
+    query ($search: String, $page: Int, $perPage: Int) {{
+      Page(page: $page, perPage: $perPage) {{
+        pageInfo {{ currentPage hasNextPage }}
+        media(search: $search, type: ANIME, sort: SEARCH_MATCH) {{ {MEDIA_FIELDS} }}
+      }}
+    }}
+    """
+    data = await anilist(gql, {"search": query, "page": page, "perPage": per_page})
+    return data.get("Page", {})
+
+async def list_media(sort: str, page: int, per_page: int, status: str | None = None):
+    gql = f"""
+    query ($page: Int, $perPage: Int, $status: MediaStatus) {{
+      Page(page: $page, perPage: $perPage) {{
+        pageInfo {{ currentPage hasNextPage }}
+        media(type: ANIME, sort: [{sort}], status: $status) {{ {MEDIA_FIELDS} }}
+      }}
+    }}
+    """
+    data = await anilist(gql, {"page": page, "perPage": per_page, "status": status})
+    return data.get("Page", {})
+
+@app.get("/api/anime/trending")
+async def trending(page: int = Query(1, ge=1, le=100), per_page: int = Query(20, ge=1, le=50)):
+    return await list_media("TRENDING_DESC", page, per_page)
+
+@app.get("/api/anime/popular")
+async def popular(page: int = Query(1, ge=1, le=100), per_page: int = Query(20, ge=1, le=50)):
+    return await list_media("POPULARITY_DESC", page, per_page)
+
+@app.get("/api/anime/genres")
+async def genres():
+    gql = "query { GenreCollection }"
+    data = await anilist(gql)
+    return {"genres": data.get("GenreCollection", [])}
+
+@app.get("/api/anime/info")
+async def anime_info(id: int = Query(ge=1)):
+    gql = f"""
+    query ($id: Int) {{
+      Media(id: $id, type: ANIME) {{
+        {MEDIA_FIELDS}
+        characters(perPage: 8, sort: [ROLE, RELEVANCE]) {{
+          nodes {{ id name {{ full }} image {{ large }} }}
+        }}
+        recommendations(perPage: 8, sort: [RATING_DESC]) {{
+          nodes {{ mediaRecommendation {{ id title {{ romaji english }} coverImage {{ large }} }} }}
+        }}
+      }}
+    }}
+    """
+    data = await anilist(gql, {"id": id})
+    media = data.get("Media")
+    if not media:
+        raise HTTPException(status_code=404, detail="Anime not found")
+    return media
