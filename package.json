@@ -1,0 +1,8 @@
+{
+  "name": "animeverse-catalog-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Vercel-ready anime catalog API for Animeverse, powered by AniList GraphQL.",
+  "scripts": {"dev": "vercel dev"},
+  "devDependencies": {"vercel": "^41.6.2"}
+}
